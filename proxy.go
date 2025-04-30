@@ -14,7 +14,7 @@ import (
 	"tcp-over-http/server"
 )
 
-const VERSION = "1.0.0"
+const VERSION = "1.0.1"
 
 func main() {
 	fmt.Println("Version: ", VERSION)
