@@ -7,6 +7,7 @@ const (
 	Read      = "read"
 	Write     = "write"
 	Goodbye   = "goodbye"
+	SSE       = "sse"
 )
 
 const BuffSize = 32 * 1024
