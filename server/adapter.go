@@ -173,8 +173,15 @@ func (a *adapter) read(c *gin.Context, itemId string) {
 	var data []byte = []byte{constant.NORMAL}
 
 	if itemId != "" {
+
+		//Consider the sse situation
+		if a.respId == "" && a.respData != nil {
+			a.respId = itemId
+		}
+
 		if itemId == a.respId {
 			c.Data(http.StatusOK, "application/octet-stream", a.respData)
+			return
 		}
 	}
 	var err error
@@ -229,6 +236,72 @@ func (a *adapter) read(c *gin.Context, itemId string) {
 		c.Data(http.StatusOK, "application/octet-stream", data)
 		log.Debug().Str("id", a.id).Str("bId", itemId).Msgf("send %d bytes with code as %d", len(data), int(data[0]))
 	}
+}
+
+func (a *adapter) sse(c *gin.Context, itemId string) {
+
+	log.Info().Str("id", a.id).Msgf("enter sse mode")
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	buff := make([]byte, constant.BuffSize)
+
+	//Clear read cache
+	a.respId = ""
+	a.respData = nil
+
+	for {
+		//set the access time
+		a.t = time.Now().Unix()
+
+		dur := time.Second * 45
+		_ = a.conn.SetReadDeadline(time.Now().Add(dur))
+		n, err := a.conn.Read(buff)
+		if err == nil {
+			data := []byte{constant.NORMAL}
+			data = append(data, buff[0:n]...)
+
+			if len(data) > 0 {
+				if len(data) > 1 {
+					if a.key != nil {
+						enc, err := encrypt(data[1:], a.key)
+						data = data[0:1]
+						if err != nil {
+							data[0] = constant.ERROR
+						} else {
+							data = append(data, enc...)
+						}
+					}
+				}
+				a.respData = data
+			}
+
+			c.String(http.StatusOK, "data: data\n")
+			c.Writer.Flush()
+
+			break
+		} else {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				c.String(http.StatusOK, "data: timeout\n")
+				c.Writer.Flush()
+			} else if errors.Is(err, io.EOF) {
+				c.String(http.StatusOK, "data: eof\n")
+				c.Writer.Flush()
+				break
+			} else {
+				if a.alive {
+					log.Error().Err(err).Str("id", a.id).Msgf("read failed")
+				}
+				c.String(http.StatusOK, "data: error\n")
+				c.Writer.Flush()
+				break
+			}
+		}
+	}
+
+	log.Info().Str("id", a.id).Msgf("exit sse mode")
+
 }
 
 func (a *adapter) shutdown() {
