@@ -43,13 +43,13 @@ func RegisterCmd(root *cobra.Command) {
 }
 
 func run(ctx context.Context, cfg *config) {
-	
+
 	keyStr = cfg.KeyStr
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.GET("/healthz", healthHandler)
 	engine.POST("/"+strings.TrimLeft(cfg.Path, "/"), proxyHandler)
-	
+
 	go startMonitorThread()
 
 	serv := &http.Server{Addr: fmt.Sprintf(":%d", cfg.Port), Handler: engine}
@@ -124,6 +124,14 @@ func proxyHandler(c *gin.Context) {
 			return
 		}
 		ad.write(c, itemId)
+
+	case constant.SSE:
+		ad := getAdapter(id)
+		if ad == nil {
+			c.Data(http.StatusOK, "application/octet-stream", []byte{constant.NO_ID})
+			return
+		}
+		ad.sse(c, itemId)
 
 	case constant.Goodbye:
 		deleteAdapter(id)
