@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -103,36 +104,58 @@ func (a *agent) work() {
 }
 
 func (a *agent) write(ctx context.Context) {
+
+	//normal model
+	mode := 0
+	count := 0
+
 	for {
-		code, raw, err := a.proxy(ctx, constant.Read, uuid.New().String()[0:8], nil)
-		if err != nil {
-			log.Error().Err(err).Str("id", a.id).Msg("client proxy receive failed")
-			_ = a.conn.Close()
-			return
-		}
-
-		if code == constant.ERROR {
-			log.Error().Str("id", a.id).Msg("received server error")
-			_ = a.conn.Close()
-			return
-		}
-
-		// log.Debug().Str("id", a.id).Msgf("received %d bytes", len(raw))
-
-		if len(raw) > 0 {
-			_, err = a.conn.Write(raw)
-
+		if mode == 0 {
+			code, raw, err := a.proxy(ctx, constant.Read, uuid.New().String()[0:8], nil)
 			if err != nil {
-				log.Error().Err(err).Str("id", a.id).Msg("client local write failed")
+				log.Error().Err(err).Str("id", a.id).Msg("client proxy receive failed")
 				_ = a.conn.Close()
 				return
 			}
-		}
 
-		if code == constant.EOF {
-			log.Error().Str("id", a.id).Msg("received server eof")
-			_ = a.conn.Close()
-			return
+			if code == constant.ERROR {
+				log.Error().Str("id", a.id).Msg("received server error")
+				_ = a.conn.Close()
+				return
+			}
+
+			// log.Debug().Str("id", a.id).Msgf("received %d bytes", len(raw))
+
+			if len(raw) > 0 {
+				_, err = a.conn.Write(raw)
+
+				if err != nil {
+					log.Error().Err(err).Str("id", a.id).Msg("client local write failed")
+					_ = a.conn.Close()
+					return
+				}
+
+				count = 0
+			} else {
+				count++
+			}
+
+			if code == constant.EOF {
+				log.Error().Str("id", a.id).Msg("received server eof")
+				_ = a.conn.Close()
+				return
+			}
+
+			//Blank for consective 2 times, switch to sse mode
+			if count > 2 {
+				mode = 1
+				count = 0
+			}
+		} else {
+			a.sse(ctx, constant.SSE, uuid.New().String()[0:8], nil)
+			//return from sse model, switch to normal mode
+			mode = 0
+			count = 0
 		}
 	}
 }
@@ -216,6 +239,65 @@ func (a *agent) proxy(ctx context.Context, action string, itemId string, data []
 	}
 
 	return code, raw, nil
+}
+
+func (a *agent) sse(ctx context.Context, action string, itemId string, data []byte) (byte, []byte, error) {
+	ctxTimeout, cancel := context.WithTimeout(ctx, time.Minute*6)
+	defer cancel()
+
+	log.Debug().Str("id", a.id).Str("itemId", itemId).Msgf("send %d bytes", len(data))
+
+	var reader io.Reader
+	if len(data) > 0 {
+		if a.key != nil {
+			var err error
+			data, err = encrypt(data, a.key)
+			if err != nil {
+				return constant.ERROR, nil, fmt.Errorf("new http request: %w", err)
+			}
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctxTimeout, http.MethodPost, a.url, reader)
+	if err != nil {
+		return constant.ERROR, nil, fmt.Errorf("new http request: %w", err)
+	}
+
+	req.Header.Set("Proxy-Id", a.id)
+	// req.Header.Set("Proxy-Target", a.target)
+	req.Header.Set("Proxy-Action", action)
+	req.Header.Set("Proxy-ItemId", itemId)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return constant.ERROR, nil, fmt.Errorf("do http request: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return constant.ERROR, nil, fmt.Errorf("do http request: status code %d", resp.StatusCode)
+	}
+
+	buf := make([]byte, 128)
+	for {
+		n, _ := resp.Body.Read(buf)
+
+		if n > 0 {
+			data := string(buf[:n])
+			lines := strings.Split(data, "\n")
+			for _, line := range lines {
+				if len(line) > 0 {
+					//Will wait only when the timeout event is sent, otherwise return
+					if line != "data: timeout" {
+						return constant.ERROR, nil, nil
+					}
+				}
+			}
+		} else {
+			return constant.ERROR, nil, nil
+		}
+	}
 }
 
 func encrypt(plaintext []byte, key []byte) (encryptedText []byte, err error) {
